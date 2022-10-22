@@ -9,7 +9,7 @@ def check_folder():
         os.mkdir('results')
 
 
-def link_generator(start=1) -> str:
+def link_generator(pages, start=1) -> str:
     endpoint = 'https://www.mangaupdates.com/series.html'
     errors = 0
     args = {
@@ -17,7 +17,7 @@ def link_generator(start=1) -> str:
         'perpage': 100,
         'orderby': 'rating'
     }
-    for i in range(start, 9999):
+    for i in range(start, pages + 1):
         print(f'iter {i}')
         args['page'] = i
         response = requests.get(endpoint, params=args)
@@ -37,32 +37,42 @@ def link_generator(start=1) -> str:
 def get_chapters_link(source):
     response = requests.get(source)
     if response.status_code != 200:
-        return None
+        return None, None
     query_main = pq.PyQuery(response.text)
     elements = query_main.find(".sContent > a").items()
+    names = list(query_main.find('.sContent').items())[3].text().split('\n')
     for elem in elements:
         # print(elem.attr('href'))
         if elem.attr('href').startswith('https://www.mangaupdates.com/releases.html?search=') and \
                 '&stype=series' in elem.attr('href'):
-            return elem.attr('href')
-    return None
+            return elem.attr('href'), names
+    return None, None
 
 
 def get_series_id(link):
     return link.replace('https://www.mangaupdates.com/releases.html?', '').split('&')[0].split('=')[1]
 
 
-def get_latest_chapter(series_id):
+def get_chapter_info(series_id):
     link = f'https://www.mangaupdates.com/releases.html?search={series_id}&perpage=100&stype=series'
     response = requests.get(link)
     if response.status_code != 200:
-        return None
+        return None, None
     query = pq.PyQuery(response.text)
     with open('test.html', 'w', encoding='utf-8') as f:
         f.write(response.text)
-    ratings = list(query.find('.col-1.text.text-center > span').items())[::1]
+    ratings = list(query.find('.col-1.text.text-center > span').items())
+    volumes = [item for i, item in enumerate(query.find('.col-1.text.text-center').items())
+               if i % 2 == 0 and item.text()]
+    _volumes = []
+    for item in volumes:
+        try:
+            _volumes.append(int(item.text()))
+        except ValueError:
+            continue
     curr_array = []
-    for item in ratings:
+    for i in range(len(ratings)):
+        item = ratings[i]
         if item.text():
             if '-' in item.text():
                 real_text = item.text().split('-')[1]
@@ -77,24 +87,102 @@ def get_latest_chapter(series_id):
             if real_chapter:
                 curr_array.append(int(real_chapter))
     if not curr_array:
-        return None
-    return max(curr_array)
+        return None, None
+    if _volumes:
+        max_volume = max(_volumes)
+    else:
+        max_volume = 0
+    return max(curr_array), max_volume
 
 
-async def perform_check():
+def find_remanga(orig_name):
+    endpoint = f'https://api.remanga.org/api/search/?query={orig_name}&count=8&field=titles&page=1'
+    response = requests.get(endpoint).json()
+    items = []
+    for item in response['content']:
+        title_id = item['id']
+        title_eng = item['en_name'].lower()
+        chapters = item['count_chapters']
+        items.append({
+            'title_id': title_id,
+            'title_eng': title_eng,
+            'chapters': chapters
+        })
+    return items
+
+
+def compare_remanga(names, chapter, remanga_items, required_rating=0.51) -> list:
+    items_return = []
+
+    for item in remanga_items:
+        max_rating = 0.0
+        name = item['title_eng']
+        for mu_name in names:
+            list_of_words = mu_name.lower().split(' ')
+            count = 0
+            for word in list_of_words:
+                if word in name:
+                    count += 1
+            cur_rating = count / len(list_of_words)
+            max_rating = max(max_rating, cur_rating)
+        if max_rating >= required_rating:
+            chapters_re = item['chapters']
+            if chapters_re > chapter:
+                items_return.append(item)
+    return items_return
+
+
+async def perform_check(start_page=1, pages=1, max_vol=3):
     check_folder()
-    links = link_generator(start=1)
+    links = link_generator(start=start_page, pages=pages)
+    items_less, items_more = [], []
     for item in links:
         # name берется с ссылки
         original_name = ' '.join(item.split('/')[-1].split('-'))
-        chapter_link = get_chapters_link(item)
+
+        try:
+            chapter_link, all_names = get_chapters_link(item)
+        except Exception as e:
+            logging.error(f'{item} - ERROR: get_chapters_link: {e}')
+            continue
         if not chapter_link:
             logging.warning(f'{item} - No chapter link, skipping')
             continue
+
         series_id = get_series_id(chapter_link)
         logging.info(f'{item} - series_id: {series_id}')
-        chapter = get_latest_chapter(series_id)
+
+        try:
+            chapter, max_volume = get_chapter_info(series_id)
+        except Exception as e:
+            logging.error(f'{item} - ERROR: get_chapter_info: {e}')
+            continue
         if not chapter:
             logging.warning(f'{item} - Can`t find latest chapter, skipping')
             continue
         logging.info(f'{item} - latest chapter is: {chapter}')
+
+        try:
+            remanga_data = find_remanga(orig_name=original_name)
+        except Exception as e:
+            logging.error(f'{item} - ERROR: find_remanga: {e}')
+            continue
+
+        try:
+            result = compare_remanga(all_names, chapter, remanga_data)
+        except Exception as e:
+            logging.error(f'{item} - ERROR: compare_remanga: {e}')
+            continue
+        if result:
+            __dict = {
+                'link': item,
+                'orig_name': original_name,
+                'max_chaps': chapter,
+                'remanga_data': result
+            }
+            if max_volume > max_vol:
+                items_more.append(__dict)
+            else:
+                items_less.append(__dict)
+    print(*items_more, sep='\n')
+    print(*items_less, sep='\n')
