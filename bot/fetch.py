@@ -108,10 +108,12 @@ async def find_remanga(orig_name):
         title_id = item['id']
         title_eng = item['en_name'].lower()
         chapters = item['count_chapters']
+        _dir = item['dir']
         items.append({
             'title_id': title_id,
             'title_eng': title_eng,
-            'chapters': chapters
+            'chapters': chapters,
+            'dir': _dir
         })
     return items
 
@@ -148,16 +150,17 @@ async def generate_csv(list1, list2, volumes):
                 title_id = row['title_id']
                 title_re = row['title_eng'].replace(',', '')
                 chapters_re = row['chapters']
-                list_to.append([orinigal_name, title_re, orig_chaps, chapters_re, title_id, orig_link])
+                dir_re = 'https://remanga.org/manga/' + row['dir']
+                list_to.append([orinigal_name, title_re, orig_chaps, chapters_re, title_id, dir_re, orig_link])
 
     rows = []
     first_row = ['Оригинальное навание', 'Название remanga',
-                 'Оригинальое кол-во глав', 'Кол-во глав Remanga', 'ID remanga', 'Ссылка оригинал']
-    delimiter_row = ['======', '======', f'Количество томов больше чем {volumes}', '======', '======', '======']
+                 'Оригинальое кол-во глав', 'Кол-во глав Remanga', 'ID remanga', 'DIR remanga', 'Ссылка оригинал']
+    delim_row = ['======', '======', '======', f'Количество томов больше чем {volumes}', '======', '======', '======']
 
     rows.append(first_row)
     generate_rows(list1, rows)
-    rows.append(delimiter_row)
+    rows.append(delim_row)
     rows.append(first_row)
     generate_rows(list2, rows)
     with open('output.csv', 'w', encoding='utf-8') as file:
