@@ -1,7 +1,11 @@
+import csv
 import logging
 import os
 import requests
 import pyquery as pq
+
+
+from .bot_buttons import get_start_keyboard
 
 
 def check_folder():
@@ -9,7 +13,7 @@ def check_folder():
         os.mkdir('results')
 
 
-def link_generator(pages, start=1) -> str:
+def link_generator(pages, start) -> str:
     endpoint = 'https://www.mangaupdates.com/series.html'
     errors = 0
     args = {
@@ -18,7 +22,7 @@ def link_generator(pages, start=1) -> str:
         'orderby': 'rating'
     }
     for i in range(start, pages + 1):
-        print(f'iter {i}')
+        print(f'iter: {i}')
         args['page'] = i
         response = requests.get(endpoint, params=args)
         if response.status_code == 400:
@@ -34,26 +38,27 @@ def link_generator(pages, start=1) -> str:
             yield link
 
 
-def get_chapters_link(source):
+async def get_chapters_link(source):
     response = requests.get(source)
     if response.status_code != 200:
         return None, None
     query_main = pq.PyQuery(response.text)
     elements = query_main.find(".sContent > a").items()
     names = list(query_main.find('.sContent').items())[3].text().split('\n')
+    original_name = query_main.find('.releasestitle.tabletitle').text()
     for elem in elements:
         # print(elem.attr('href'))
         if elem.attr('href').startswith('https://www.mangaupdates.com/releases.html?search=') and \
                 '&stype=series' in elem.attr('href'):
-            return elem.attr('href'), names
-    return None, None
+            return elem.attr('href'), names, original_name
+    return None, None, None
 
 
-def get_series_id(link):
+async def get_series_id(link):
     return link.replace('https://www.mangaupdates.com/releases.html?', '').split('&')[0].split('=')[1]
 
 
-def get_chapter_info(series_id):
+async def get_chapter_info(series_id):
     link = f'https://www.mangaupdates.com/releases.html?search={series_id}&perpage=100&stype=series'
     response = requests.get(link)
     if response.status_code != 200:
@@ -95,7 +100,7 @@ def get_chapter_info(series_id):
     return max(curr_array), max_volume
 
 
-def find_remanga(orig_name):
+async def find_remanga(orig_name):
     endpoint = f'https://api.remanga.org/api/search/?query={orig_name}&count=8&field=titles&page=1'
     response = requests.get(endpoint).json()
     items = []
@@ -111,7 +116,7 @@ def find_remanga(orig_name):
     return items
 
 
-def compare_remanga(names, chapter, remanga_items, required_rating=0.51) -> list:
+async def compare_remanga(names, chapter, remanga_items, required_rating=0.51) -> list:
     items_return = []
 
     for item in remanga_items:
@@ -132,16 +137,44 @@ def compare_remanga(names, chapter, remanga_items, required_rating=0.51) -> list
     return items_return
 
 
-async def perform_check(start_page=1, pages=1, max_vol=3):
+async def generate_csv(list1, list2, volumes):
+
+    def generate_rows(list_data, list_to):
+        for item in list_data:
+            orinigal_name = item['orig_name'].replace(',', '')
+            orig_link = item['link']
+            orig_chaps = item['max_chaps']
+            for row in item['remanga_data']:
+                title_id = row['title_id']
+                title_re = row['title_eng'].replace(',', '')
+                chapters_re = row['chapters']
+                list_to.append([orinigal_name, title_re, orig_chaps, chapters_re, title_id, orig_link])
+
+    rows = []
+    first_row = ['Оригинальное навание', 'Название remanga',
+                 'Оригинальое кол-во глав', 'Кол-во глав Remanga', 'ID remanga', 'Ссылка оригинал']
+    delimiter_row = ['======', '======', f'Количество томов больше чем {volumes}', '======', '======', '======']
+
+    rows.append(first_row)
+    generate_rows(list1, rows)
+    rows.append(delimiter_row)
+    rows.append(first_row)
+    generate_rows(list2, rows)
+    with open('output.csv', 'w', encoding='utf-8') as file:
+        writer = csv.writer(file, delimiter=';')
+        writer.writerows(rows)
+
+
+async def perform_check(start_page=1, pages=9999, max_vol=3, percent=0.51, msg=None, bot=None):
     check_folder()
     links = link_generator(start=start_page, pages=pages)
     items_less, items_more = [], []
     for item in links:
         # name берется с ссылки
-        original_name = ' '.join(item.split('/')[-1].split('-'))
-
+        # original_name = ' '.join(item.split('/')[-1].split('-'))
+        # со страницы
         try:
-            chapter_link, all_names = get_chapters_link(item)
+            chapter_link, all_names, original_name = await get_chapters_link(item)
         except Exception as e:
             logging.error(f'{item} - ERROR: get_chapters_link: {e}')
             continue
@@ -149,11 +182,11 @@ async def perform_check(start_page=1, pages=1, max_vol=3):
             logging.warning(f'{item} - No chapter link, skipping')
             continue
 
-        series_id = get_series_id(chapter_link)
+        series_id = await get_series_id(chapter_link)
         logging.info(f'{item} - series_id: {series_id}')
 
         try:
-            chapter, max_volume = get_chapter_info(series_id)
+            chapter, max_volume = await get_chapter_info(series_id)
         except Exception as e:
             logging.error(f'{item} - ERROR: get_chapter_info: {e}')
             continue
@@ -163,13 +196,13 @@ async def perform_check(start_page=1, pages=1, max_vol=3):
         logging.info(f'{item} - latest chapter is: {chapter}')
 
         try:
-            remanga_data = find_remanga(orig_name=original_name)
+            remanga_data = await find_remanga(orig_name=original_name)
         except Exception as e:
             logging.error(f'{item} - ERROR: find_remanga: {e}')
             continue
 
         try:
-            result = compare_remanga(all_names, chapter, remanga_data)
+            result = await compare_remanga(all_names, chapter, remanga_data, required_rating=percent)
         except Exception as e:
             logging.error(f'{item} - ERROR: compare_remanga: {e}')
             continue
@@ -184,5 +217,7 @@ async def perform_check(start_page=1, pages=1, max_vol=3):
                 items_more.append(__dict)
             else:
                 items_less.append(__dict)
-    print(*items_more, sep='\n')
-    print(*items_less, sep='\n')
+    await generate_csv(items_less, items_more, max_vol)
+    await msg.reply('Проверка завершена, отправка файла...', reply_markup=get_start_keyboard())
+    with open('output.csv', 'rb') as file:
+        await bot.send_document(msg.from_user.id, file)
